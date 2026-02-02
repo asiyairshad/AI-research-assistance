@@ -1,0 +1,11 @@
+llama-index
+langchain
+pymupdf
+streamlit
+chromadb
+docling
+openai
+torch
+transformers
+torchvision
+pillow
