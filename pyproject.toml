@@ -8,6 +8,7 @@ dependencies = [
     "chromadb>=1.4.1",
     "docling>=2.71.0",
     "langchain>=1.2.7",
+    "langsmith>=0.6.7",
     "llama-index>=0.14.13",
     "openai>=2.16.0",
     "opencv-python>=4.13.0.90",

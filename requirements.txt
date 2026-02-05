@@ -9,3 +9,4 @@ torch
 transformers
 torchvision
 pillow
+langsmith

@@ -1,10 +1,14 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 from ingest import parse_pdf_bytes, extract_images_bytes
 from embeddings import embed
 from vectore_store import add_vector, clear_db
 from rag import answer
 
-st.title("True Multimodal Research Assistant")
+
+st.title("Multimodal Research Assistant")
 
 all_image_chunks = []
 
@@ -39,8 +43,11 @@ if uploaded_files:
 query = st.text_input("Ask a question")
 
 if query:
-    response = answer(query, all_image_chunks)
+    response, used_image = answer(query, all_image_chunks)
     st.write(response)
 
-    for chunk in all_image_chunks:
-        st.image(chunk.content, caption=f"Page {chunk.page}")
+    # 👇 THIS IS THE FIX
+    if used_image:
+        st.subheader("Relevant figures")
+        for chunk in all_image_chunks:
+            st.image(chunk.content, caption=f"Page {chunk.page}")
