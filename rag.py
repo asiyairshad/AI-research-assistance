@@ -30,7 +30,7 @@ def pil_to_base64(image):
     return base64.b64encode(buffer.getvalue()).decode()
 
 @traceable
-def answer(query, image_chunks):
+def answer(query, image_chunks, mode = "fast"):
     # 1. Text retrieval
     q_vec = embed(type("obj",(object,),{"content":query,"modality":"text"}))
     text_results = query_text(q_vec)
@@ -39,6 +39,20 @@ def answer(query, image_chunks):
     if text_results["metadatas"]:
         for r in text_results["metadatas"][0]:
             context += f"(Page {r['page']}): {r['content']}\n"
+
+    #fast mode
+    if mode == "fast":
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": context + "\n" + query
+                }
+            ]
+        )
+        return response.choices[0].message.content, False 
 
     # 2. Decide if image is needed
     decision = client.chat.completions.create(

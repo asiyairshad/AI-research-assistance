@@ -7,7 +7,6 @@ from embeddings import embed
 from vectore_store import add_vector, clear_db
 from rag import answer
 
-
 st.title("Multimodal Research Assistant")
 
 all_image_chunks = []
@@ -38,16 +37,24 @@ if uploaded_files:
             })
 
     st.success("All documents indexed")
+#mode selector
+mode = st.radio(
+    "Choose response mode",
+    ["fast", "quality"],
+    horizontal=True
+)
 
 
 query = st.text_input("Ask a question")
 
 if query:
-    response, used_image = answer(query, all_image_chunks)
+    response, used_image = answer(query, all_image_chunks, mode = mode)
     st.write(response)
 
-    # 👇 THIS IS THE FIX
     if used_image:
         st.subheader("Relevant figures")
         for chunk in all_image_chunks:
             st.image(chunk.content, caption=f"Page {chunk.page}")
+
+
+
