@@ -1,115 +1,158 @@
-from openai import OpenAI
-from embeddings import embed
-from vectore_store import query_text
 import base64
-import io
+from openai import OpenAI
+from embeddings import (
+    embed_query_for_text,
+    embed_query_for_image
+)
+from vectore_store import query_text, query_image
+from dotenv import load_dotenv
 from langsmith import traceable
 
-from dotenv import load_dotenv
-load_dotenv()
+from cache_store import (
+    get_cached_embedding,
+    save_embedding,
+    get_cached_answer,
+    save_answer
+)
+import os 
 
+os.environ['LANGCHAIN_PROJECT'] = "multimodal-rag"
+
+load_dotenv()
 client = OpenAI()
 
 SYSTEM_PROMPT = """
 You are a research assistant.
-You must answer using ONLY the provided context.
-If the answer is not in the context, say "I don't know".
-and if the asked question is also related to text as well as image then answer with context of image as well
-and answer in proper manner and structure and also explain about image , and if in any question
-there is no need of image then dont show image, if not needed 
-Do not use any external knowledge.
-Be concise and factual.
-
-and if there is no need of image then please dont fetch image only text
+Answer strictly using ONLY the provided context.
+If query is to explain or describe then describe everything so that the user understands clearly, especially if an image is provided.
+and also answer in a way that is helpful for researchers, providing page numbers when referencing text.
+and also if require answer in points whenever relevent.
+If the answer is not found, say "I don't know".
+If an image is provided, explain it clearly when relevant.
+Be structured, concise, and factual.
+Do not use external knowledge.
 """
 
 
-def pil_to_base64(image):
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode()
+def needs_image(query: str) -> bool:
+    keywords = ["figure", "fig", "diagram", "image", "visual", "show"]
+    return any(word in query.lower() for word in keywords)
+
+
 
 @traceable
-def answer(query, image_chunks, mode = "fast"):
-    # 1. Text retrieval
-    q_vec = embed(type("obj",(object,),{"content":query,"modality":"text"}))
-    text_results = query_text(q_vec)
+def answer(query: str, mode="fast"):
+
+    # ----------------------------
+    # 0️⃣ ANSWER CACHE CHECK
+    # ----------------------------
+    cached_answer = get_cached_answer(query)
+    if cached_answer:
+        return cached_answer  # (response_text, image_base64)
+
+
+    # ----------------------------
+    # 1️⃣ TEXT EMBEDDING (WITH CACHE)
+    # ----------------------------
+    text_query_vec = get_cached_embedding(query, "text")
+
+    if not text_query_vec:
+        text_query_vec = embed_query_for_text(query)
+        save_embedding(query, text_query_vec, "text")
+
+    text_results = query_text(text_query_vec)
 
     context = ""
-    if text_results["metadatas"]:
+    if text_results and text_results.get("metadatas"):
         for r in text_results["metadatas"][0]:
-            context += f"(Page {r['page']}): {r['content']}\n"
+            context += f"(Page {r.get('page', 'N/A')}): {r.get('content', '')}\n"
 
-    #fast mode
-    if mode == "fast":
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": context + "\n" + query
-                }
-            ]
-        )
-        return response.choices[0].message.content, False 
+    # If no context retrieved → stop
+    if not context.strip():
+        return "I don't know", None
 
-    # 2. Decide if image is needed
-    decision = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"""
-Question: {query}
 
-Context:
-{context}
+    # ----------------------------
+    # 2️⃣ IMAGE RETRIEVAL (SAFE)
+    # ----------------------------
+    image_query_vec = None
+    image_base64 = None
 
-Is a visual figure needed to answer this?
-Reply only YES or NO.
-"""
-            }
-        ]
-    )
+    if needs_image(query):
 
-    use_image = "YES" in decision.choices[0].message.content.upper()
+        image_query_vec = get_cached_embedding(query, "image")
 
-    # 3. If yes → use vision
-    if use_image and len(image_chunks) > 0:
-        image = image_chunks[0].content
-        image_b64 = pil_to_base64(image)
+        if not image_query_vec:
+            image_query_vec = embed_query_for_image(query)
+            save_embedding(query, image_query_vec, "image")
+
+        image_results = query_image(image_query_vec)
+
+        if image_results and image_results.get("metadatas"):
+            for r in image_results["metadatas"][0]:
+                if "image_base64" in r:
+                    image_base64 = r["image_base64"]
+                    break
+
+
+    # ----------------------------
+    # 3️⃣ MODEL SELECTION
+    # ----------------------------
+    model_name = "gpt-4o-mini" if mode == "fast" else "gpt-4o"
+
+
+    # ----------------------------
+    # 4️⃣ MULTIMODAL CALL
+    # ----------------------------
+    if image_base64:
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=model_name,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": context + "\n" + query},
+                        {
+                            "type": "text",
+                            "text": f"Context:\n{context}\n\nQuestion:\n{query}"
+                        },
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{image_b64}"
+                                "url": f"data:image/png;base64,{image_base64}"
                             }
                         }
                     ]
                 }
             ]
         )
-        return response.choices[0].message.content, True
 
-    # 4. Otherwise → normal text answer
+        response_text = response.choices[0].message.content
+
+        save_answer(query, response_text, image_base64)
+
+        return response_text, image_base64
+
+
+    # ----------------------------
+    # 5️⃣ TEXT-ONLY CALL
+    # ----------------------------
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=model_name,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": context + "\n" + query
+                "content": f"Context:\n{context}\n\nQuestion:\n{query}"
             }
         ]
     )
-    return response.choices[0].message.content,False
+
+    response_text = response.choices[0].message.content
+
+    save_answer(query, response_text, None)
+
+    return response_text, None
+
+
