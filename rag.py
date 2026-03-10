@@ -1,158 +1,177 @@
-import base64
+import os
 from openai import OpenAI
-from embeddings import (
-    embed_query_for_text,
-    embed_query_for_image
-)
-from vectore_store import query_text, query_image
 from dotenv import load_dotenv
 from langsmith import traceable
 
+from embeddings import embed_query_for_text, embed_query_for_image
+from vectore_store import query_text, query_image
 from cache_store import (
     get_cached_embedding,
     save_embedding,
     get_cached_answer,
     save_answer
 )
-import os 
 
-os.environ['LANGCHAIN_PROJECT'] = "multimodal-rag"
+from schemas import RAGResponse, AnswerSchema
+
 
 load_dotenv()
-client = OpenAI()
 
-SYSTEM_PROMPT = """
+os.environ["LANGCHAIN_PROJECT"] = "multimodal-rag"
+
+
+class MultimodalRAG:
+
+    def __init__(self):
+
+        self.client = OpenAI()
+
+        self.system_prompt = """
 You are a research assistant.
-Answer strictly using ONLY the provided context.
-If query is to explain or describe then describe everything so that the user understands clearly, especially if an image is provided.
-and also answer in a way that is helpful for researchers, providing page numbers when referencing text.
-and also if require answer in points whenever relevent.
-If the answer is not found, say "I don't know".
-If an image is provided, explain it clearly when relevant.
-Be structured, concise, and factual.
-Do not use external knowledge.
+
+Answer ONLY using the provided context.
+
+If an image is provided, analyze it and explain clearly.
+
+If the answer is not in the context say "I don't know".
 """
 
 
-def needs_image(query: str) -> bool:
-    keywords = ["figure", "fig", "diagram", "image", "visual", "show"]
-    return any(word in query.lower() for word in keywords)
+    def embed_text(self, query):
+
+        vec = get_cached_embedding(query, "text")
+
+        if vec is None:
+            vec = embed_query_for_text(query)
+            save_embedding(query, vec, "text")
+
+        return vec
 
 
+    def embed_image(self, query):
 
-@traceable
-def answer(query: str, mode="fast"):
+        vec = get_cached_embedding(query, "image")
 
-    # ----------------------------
-    # 0️⃣ ANSWER CACHE CHECK
-    # ----------------------------
-    cached_answer = get_cached_answer(query)
-    if cached_answer:
-        return cached_answer  # (response_text, image_base64)
+        if vec is None:
+            vec = embed_query_for_image(query)
+            save_embedding(query, vec, "image")
 
-
-    # ----------------------------
-    # 1️⃣ TEXT EMBEDDING (WITH CACHE)
-    # ----------------------------
-    text_query_vec = get_cached_embedding(query, "text")
-
-    if not text_query_vec:
-        text_query_vec = embed_query_for_text(query)
-        save_embedding(query, text_query_vec, "text")
-
-    text_results = query_text(text_query_vec)
-
-    context = ""
-    if text_results and text_results.get("metadatas"):
-        for r in text_results["metadatas"][0]:
-            context += f"(Page {r.get('page', 'N/A')}): {r.get('content', '')}\n"
-
-    # If no context retrieved → stop
-    if not context.strip():
-        return "I don't know", None
+        return vec
 
 
-    # ----------------------------
-    # 2️⃣ IMAGE RETRIEVAL (SAFE)
-    # ----------------------------
-    image_query_vec = None
-    image_base64 = None
+    def retrieve_text(self, query):
 
-    if needs_image(query):
+        vec = self.embed_text(query)
+        results = query_text(vec)
+        context = ""
+        pages = []
 
-        image_query_vec = get_cached_embedding(query, "image")
+        if results and results.get("metadatas"):
 
-        if not image_query_vec:
-            image_query_vec = embed_query_for_image(query)
-            save_embedding(query, image_query_vec, "image")
+            for r in results["metadatas"][0]:
+                page = r.get("page", "N/A")
+                content = r.get("content", "")
+                context += f"(Page {page}): {content}\n"
 
-        image_results = query_image(image_query_vec)
+                if page != "N/A":
+                    pages.append(page)
 
-        if image_results and image_results.get("metadatas"):
-            for r in image_results["metadatas"][0]:
+        return context, pages
+
+    def retrieve_image(self, query):
+
+        vec = self.embed_image(query)
+        results = query_image(vec)
+        image_base64 = None
+
+        if results and results.get("metadatas"):
+
+            for r in results["metadatas"][0]:
+
                 if "image_base64" in r:
                     image_base64 = r["image_base64"]
                     break
 
-
-    # ----------------------------
-    # 3️⃣ MODEL SELECTION
-    # ----------------------------
-    model_name = "gpt-4o-mini" if mode == "fast" else "gpt-4o"
+        return image_base64
 
 
-    # ----------------------------
-    # 4️⃣ MULTIMODAL CALL
-    # ----------------------------
-    if image_base64:
+    def generate_answer(self, query, context, image, mode):
 
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"Context:\n{context}\n\nQuestion:\n{query}"
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image_base64}"
+        model_name = "gpt-4o-mini" if mode == "fast" else "gpt-4o"
+
+        if image:
+
+            response = self.client.chat.completions.parse(
+
+                model=model_name,
+
+                messages=[
+
+                    {"role": "system", "content": self.system_prompt},
+
+                    {
+                        "role": "user",
+
+                        "content": [
+
+                            {
+                                "type": "text",
+                                "text": f"Context:\n{context}\n\nQuestion:{query}"
+                            },
+
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ]
+
+                        ]
+                    }
+
+                ],
+
+                response_format=AnswerSchema
+            )
+
+        else:
+
+            response = self.client.chat.completions.parse(
+
+                model=model_name,
+
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion:{query}"}
+                ],
+
+                response_format=AnswerSchema
+            )
+
+        return response.choices[0].message.parsed.answer
+
+
+    @traceable
+    def answer(self, query, mode="fast"):
+
+        cached = get_cached_answer(query)
+
+        if cached:
+            return RAGResponse(**cached)
+
+        context, pages = self.retrieve_text(query)
+
+        if not context:
+            return RAGResponse(answer="I don't know")
+
+        image = self.retrieve_image(query)
+
+        answer = self.generate_answer(query, context, image, mode)
+
+        save_answer(query, answer, image)
+
+        return RAGResponse(
+            answer=answer,
+            source_pages=pages,
+            image_base64=image
         )
-
-        response_text = response.choices[0].message.content
-
-        save_answer(query, response_text, image_base64)
-
-        return response_text, image_base64
-
-
-    # ----------------------------
-    # 5️⃣ TEXT-ONLY CALL
-    # ----------------------------
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"Context:\n{context}\n\nQuestion:\n{query}"
-            }
-        ]
-    )
-
-    response_text = response.choices[0].message.content
-
-    save_answer(query, response_text, None)
-
-    return response_text, None
-
-

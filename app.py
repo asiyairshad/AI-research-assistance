@@ -8,7 +8,9 @@ import base64
 from ingest import parse_pdf_bytes, extract_images_bytes
 from embeddings import embed_text, embed_image
 from vectore_store import add_vector, clear_db
-from rag import answer
+from rag import MultimodalRAG
+
+rag = MultimodalRAG()
 
 st.set_page_config(page_title="Multimodal Research Assistant")
 st.title("Multimodal Research Assistant")
@@ -84,11 +86,11 @@ query = st.text_input("Ask a question")
 
 if st.button("Ask") and query:
     with st.spinner("Thinking..."):
-        response, image_base64 = answer(query, mode=mode)
+        response = rag.answer(query, mode)
 
     st.subheader("Answer")
-    st.write(response)
+    st.write(response.answer)
 
-    if image_base64:
+    if response.image_base64:
         st.subheader("Relevant Image")
-        st.image(base64.b64decode(image_base64))
+        st.image(base64.b64decode(response.image_base64))
